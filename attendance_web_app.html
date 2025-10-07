@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Ứng dụng điểm danh - QR + Mật khẩu</title>
+  <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+</head>
+<body class="bg-gray-50 text-gray-800 p-4">
+  <div class="max-w-5xl mx-auto">
+    <header class="mb-6">
+      <h1 class="text-2xl font-semibold">Ứng dụng điểm danh (QR + Mật khẩu)</h1>
+      <p class="text-sm text-gray-600">Chạy trên trình duyệt điện thoại của người chủ. Người chủ dùng camera để quét QR của thành viên; nếu thành viên không có điện thoại thì nhập mật khẩu.</p>
+    </header>
+
+    <main class="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <!-- Left: Member management -->
+      <section class="bg-white p-4 rounded shadow">
+        <h2 class="font-medium">1. Quản lý thành viên</h2>
+        <form id="memberForm" class="mt-3 space-y-2">
+          <div>
+            <input id="memberName" placeholder="Tên thành viên" class="w-full p-2 border rounded" />
+          </div>
+          <div class="flex space-x-2">
+            <input id="memberId" placeholder="ID (mã riêng)" class="flex-1 p-2 border rounded" />
+            <input id="memberPwd" placeholder="Mật khẩu (dự phòng)" class="w-40 p-2 border rounded" />
+          </div>
+          <div class="flex space-x-2">
+            <button type="button" id="addMemberBtn" class="px-3 py-2 bg-blue-600 text-white rounded">Thêm thành viên</button>
+            <button type="button" id="importSample" class="px-3 py-2 border rounded">Mẫu 5</button>
+            <button type="button" id="exportMembers" class="px-3 py-2 border rounded">Xuất CSV</button>
+          </div>
+        </form>
+
+        <div class="mt-4">
+          <h3 class="font-medium">Danh sách thành viên</h3>
+          <div id="membersList" class="mt-2 space-y-2 max-h-56 overflow-auto"></div>
+        </div>
+      </section>
+
+      <!-- Right: Scanner & Manual -->
+      <section class="bg-white p-4 rounded shadow">
+        <h2 class="font-medium">2. Quét QR & Điểm danh</h2>
+        <div class="mt-3">
+          <div class="space-y-2">
+            <div class="flex items-center space-x-2">
+              <button id="startScanner" class="px-3 py-2 bg-green-600 text-white rounded">Bắt đầu quét</button>
+              <button id="stopScanner" class="px-3 py-2 border rounded">Dừng</button>
+              <button id="clearAttendance" class="px-3 py-2 border rounded">Xoá buổi hôm nay</button>
+            </div>
+            <div id="videoWrap" class="mt-2">
+              <video id="video" autoplay playsinline class="w-full rounded bg-black"></video>
+              <canvas id="scanCanvas" class="hidden"></canvas>
+            </div>
+          </div>
+
+          <div class="mt-4">
+            <h3 class="font-medium">Nhập thủ công (ID + mật khẩu)</h3>
+            <div class="flex space-x-2 mt-2">
+              <input id="manualId" placeholder="ID" class="p-2 border rounded flex-1" />
+              <input id="manualPwd" placeholder="Mật khẩu" class="p-2 border rounded w-48" />
+              <button id="manualMark" class="px-3 py-2 bg-indigo-600 text-white rounded">Ghi có mặt</button>
+            </div>
+          </div>
+
+          <div class="mt-4">
+            <h3 class="font-medium">Buổi hôm nay</h3>
+            <div class="mt-2" id="attendanceList"></div>
+            <div class="mt-2 flex space-x-2">
+              <button id="exportAttendance" class="px-3 py-2 border rounded">Xuất CSV</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Bottom: QR generation / Help -->
+      <section class="md:col-span-2 bg-white p-4 rounded shadow">
+        <h2 class="font-medium">3. Tạo QR cho thành viên</h2>
+        <p class="text-sm text-gray-600">Mỗi thành viên có thể hiển thị QR (chứa ID). Khi người chủ quét QR này bằng camera, ứng dụng sẽ ghi có mặt.</p>
+        <div id="qrGallery" class="mt-3 grid grid-cols-2 sm:grid-cols-4 gap-4"></div>
+      </section>
+
+    </main>
+
+    <footer class="mt-6 text-sm text-gray-500">Lưu ý: dữ liệu lưu tạm trên trình duyệt (localStorage). Bạn có thể xuất CSV để lưu trữ lâu dài.</footer>
+  </div>
+
+  <!-- Libraries: jsQR (quét) + qrcodejs (tạo QR) -->
+  <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/davidshimjs/qrcodejs/qrcode.min.js"></script>
+
+  <script>
+    // --- Utils ---
+    function uid() { return Math.random().toString(36).slice(2,9); }
+    function nowISO() { return new Date().toISOString(); }
+    function downloadCSV(filename, rows) {
+      const csv = rows.map(r => r.map(c => '"'+String(c).replace(/"/g,'""')+'"').join(',')).join('\n');
+      const blob = new Blob([csv], {type:'text/csv;charset=utf-8;'});
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = filename;
+      link.click();
+    }
+
+    // --- Storage ---
+    const STORAGE_KEYS = { MEMBERS: 'att_members_v1', ATT: 'att_log_v1' };
+    function loadMembers(){ return JSON.parse(localStorage.getItem(STORAGE_KEYS.MEMBERS) || '[]'); }
+    function saveMembers(list){ localStorage.setItem(STORAGE_KEYS.MEMBERS, JSON.stringify(list)); }
+    function loadAttendance(){ return JSON.parse(localStorage.getItem(STORAGE_KEYS.ATT) || '[]'); }
+    function saveAttendance(list){ localStorage.setItem(STORAGE_KEYS.ATT, JSON.stringify(list)); }
+
+    // --- DOM refs ---
+    const membersListEl = document.getElementById('membersList');
+    const addMemberBtn = document.getElementById('addMemberBtn');
+    const memberName = document.getElementById('memberName');
+    const memberId = document.getElementById('memberId');
+    const memberPwd = document.getElementById('memberPwd');
+    const qrGallery = document.getElementById('qrGallery');
+
+    const startScanner = document.getElementById('startScanner');
+    const stopScanner = document.getElementById('stopScanner');
+    const video = document.getElementById('video');
+    const scanCanvas = document.getElementById('scanCanvas');
+    const manualId = document.getElementById('manualId');
+    const manualPwd = document.getElementById('manualPwd');
+    const manualMark = document.getElementById('manualMark');
+    const attendanceList = document.getElementById('attendanceList');
+    const exportAttendance = document.getElementById('exportAttendance');
+    const clearAttendance = document.getElementById('clearAttendance');
+    const importSample = document.getElementById('importSample');
+    const exportMembers = document.getElementById('exportMembers');
+
+    let stream = null;
+    let scanning = false;
+
+    // --- Members UI ---
+    function renderMembers(){
+      const list = loadMembers();
+      membersListEl.innerHTML = '';
+      qrGallery.innerHTML = '';
+      list.forEach(m => {
+        const row = document.createElement('div');
+        row.className = 'flex items-center justify-between p-2 border rounded';
+        row.innerHTML = `<div><div class=\"font-medium\">${m.name}</div><div class=\"text-xs text-gray-500\">ID: ${m.id} • Pwd: ${m.pwd}</div></div>
+          <div class=\"flex items-center space-x-2\"> <button data-id=\"${m.id}\" class=\"showQR btn px-2 py-1 border rounded text-sm\">Hiện QR</button> <button data-id=\"${m.id}\" class=\"delMember btn px-2 py-1 border rounded text-sm\">Xoá</button></div>`;
+        membersListEl.appendChild(row);
+
+        // QR card
+        const card = document.createElement('div');
+        card.className = 'p-3 border rounded text-center';
+        const holder = document.createElement('div');
+        holder.id = 'qr_' + m.id;
+        card.appendChild(holder);
+        const lbl = document.createElement('div'); lbl.className='mt-2 text-sm'; lbl.innerText = m.name;
+        card.appendChild(lbl);
+        qrGallery.appendChild(card);
+
+        // generate QR (content = JSON string with id)
+        new QRCode(holder, { text: JSON.stringify({id:m.id}), width: 140, height: 140 });
+      });
+
+      // attach events
+      document.querySelectorAll('.delMember').forEach(b=> b.onclick = e=>{
+        const id = e.target.dataset.id; if(!confirm('Xoá thành viên?')) return;
+        const l = loadMembers().filter(x=> x.id !== id); saveMembers(l); renderMembers();
+      });
+      document.querySelectorAll('.showQR').forEach(b=> b.onclick = e=>{
+        const id = e.target.dataset.id; const m = loadMembers().find(x=> x.id===id);
+        if(!m) return; const data = encodeURIComponent(JSON.stringify({id:m.id, name:m.name}));
+        const w = window.open(); w.document.write(`<html><body style="font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0"><div id=\"q\"></div><div style=\"position:fixed;bottom:10px;left:10px;right:10px;text-align:center;font-size:14px\">${m.name}<br>ID: ${m.id}</div><script src=\"https://cdn.jsdelivr.net/gh/davidshimjs/qrcodejs/qrcode.min.js\"></script><script>new QRCode(document.getElementById('q'),{text:decodeURIComponent('${data}'),width:300,height:300});</script></body></html>`);
+      });
+    }
+
+    addMemberBtn.onclick = ()=>{
+      const name = memberName.value.trim(); const idVal = memberId.value.trim() || uid(); const pwd = memberPwd.value.trim() || '1234';
+      if(!name){ alert('Nhập tên'); return; }
+      const list = loadMembers();
+      if(list.some(x=> x.id === idVal)){ alert('ID đã tồn tại'); return; }
+      list.push({name, id: idVal, pwd}); saveMembers(list); memberName.value=''; memberId.value=''; memberPwd.value=''; renderMembers();
+    };
+
+    importSample.onclick = ()=>{
+      const sample = [
+        {name:'An', id:'A01', pwd:'1111'},{name:'Binh', id:'B02', pwd:'2222'},{name:'Chi', id:'C03', pwd:'3333'},{name:'Duc', id:'D04', pwd:'4444'},{name:'Em', id:'E05', pwd:'5555'}
+      ]; saveMembers(sample); renderMembers();
+    }
+
+    exportMembers.onclick = ()=>{
+      const list = loadMembers(); const rows = [['name','id','pwd'], ...list.map(x=>[x.name,x.id,x.pwd])]; downloadCSV('members.csv', rows);
+    }
+
+    // --- Attendance ---
+    function markAttendanceById(id, method='qr'){
+      const mem = loadMembers().find(m=> m.id === id);
+      if(!mem) return {ok:false, msg:'Không tìm thấy ID'};
+      const att = loadAttendance();
+      const today = new Date().toISOString().slice(0,10);
+      // prevent duplicate in same day
+      if(att.some(a=> a.id===id && a.date===today)) return {ok:false, msg:'Đã điểm danh hôm nay'};
+      att.push({id, name: mem.name, date: today, time: new Date().toLocaleTimeString(), method, ts: nowISO()});
+      saveAttendance(att); renderAttendance(); return {ok:true};
+    }
+
+    function renderAttendance(){
+      const att = loadAttendance(); const today = new Date().toISOString().slice(0,10);
+      const todayList = att.filter(a=> a.date === today);
+      attendanceList.innerHTML = '';
+      if(todayList.length===0) attendanceList.innerHTML = '<div class="text-sm text-gray-500">Chưa có ai điểm danh hôm nay.</div>';
+      todayList.forEach(a=>{
+        const r = document.createElement('div'); r.className='p-2 border-b flex justify-between items-center';
+        r.innerHTML = `<div><div class=\"font-medium\">${a.name}</div><div class=\"text-xs text-gray-500\">ID: ${a.id} • ${a.date} ${a.time}</div></div><div class=\"text-xs text-gray-500\">${a.method}</div>`;
+        attendanceList.appendChild(r);
+      });
+    }
+
+    exportAttendance.onclick = ()=>{
+      const att = loadAttendance(); const rows = [['name','id','date','time','method','ts'], ...att.map(a=>[a.name,a.id,a.date,a.time,a.method,a.ts])]; downloadCSV('attendance.csv', rows);
+    }
+
+    clearAttendance.onclick = ()=>{
+      if(!confirm('Xoá hết điểm danh hôm nay?')) return; const all = loadAttendance(); const today = new Date().toISOString().slice(0,10); const remain = all.filter(a=> a.date !== today); saveAttendance(remain); renderAttendance();
+    }
+
+    manualMark.onclick = ()=>{
+      const id = manualId.value.trim(); const pwd = manualPwd.value.trim();
+      if(!id || !pwd){ alert('Nhập ID và mật khẩu'); return; }
+      const mem = loadMembers().find(x=> x.id === id && x.pwd === pwd);
+      if(!mem){ alert('ID hoặc mật khẩu sai'); return; }
+      const res = markAttendanceById(id, 'manual'); if(!res.ok) alert(res.msg); else { alert('Đã điểm danh: '+mem.name); manualId.value=''; manualPwd.value=''; }
+    }
+
+    // --- Scanner logic (jsQR) ---
+    let scanInterval = null;
+    startScanner.onclick = async ()=>{
+      if(scanning) return;
+      try{
+        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } , audio:false});
+        video.srcObject = stream; await video.play();
+        scanning = true;
+        scanCanvas.width = video.videoWidth; scanCanvas.height = video.videoHeight; scanInterval = setInterval(scanFrame, 300);
+      }catch(err){ alert('Không thể mở camera: '+err.message); }
+    }
+    stopScanner.onclick = ()=>{
+      scanning = false; if(scanInterval) clearInterval(scanInterval); if(stream) { stream.getTracks().forEach(t=>t.stop()); video.srcObject = null; }
+    }
+
+    function scanFrame(){
+      if(video.readyState !== video.HAVE_ENOUGH_DATA) return;
+      const ctx = scanCanvas.getContext('2d'); scanCanvas.width = video.videoWidth; scanCanvas.height = video.videoHeight;
+      ctx.drawImage(video,0,0,scanCanvas.width, scanCanvas.height);
+      const img = ctx.getImageData(0,0,scanCanvas.width, scanCanvas.height);
+      const code = jsQR(img.data, img.width, img.height);
+      if(code){
+        // try parse JSON
+        let payload = null;
+        try{ payload = JSON.parse(code.data); }catch(e){ payload = {id: code.data}; }
+        const id = payload.id || payload.ID || code.data;
+        const res = markAttendanceById(id, 'qr');
+        if(res.ok){ alert('Ghi có mặt: '+ (payload.name || id)); }
+        else{ alert(res.msg); }
+      }
+    }
+
+    // --- Init ---
+    renderMembers(); renderAttendance();
+  </script>
+</body>
+</html>
